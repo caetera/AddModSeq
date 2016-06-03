@@ -18,15 +18,15 @@ import tkMessageBox
 
 
 #constants
-
-#moddict = {"Phosp": "p", "Phospho": "p", "ph": "p","Ga co": "g", "Label": "X", "LabelR0": "B", "Carbamidomethyl": "", "111.0": "",\
-#            "Dimethyl": "d", "Dimethyl:2H(4)": "d4", "Oxidation": "o", "ox": "o", "Dimethyl:2H(4)13C(2)": "d6",\
-#            "Dimethyl:2H(6)13C(2)": "d8", "Label:13C(6)15N(2)": "s8", "Acetyl": "a", "PhosphoGa": "g", "Prot)(Acetyl": "a",\
-#            "TMT6plex": "t6", "Deami": "(da)", "Deamidated": "(da)"}
-
 moddict = {}
 modifications = {}
 prsProb = 0.0
+
+#regexes
+daExpr = re.compile('N[^P][STC]')
+flankExpr = re.compile(r"(\[.+\]\.)(\w+)(\.\[.+\])")
+ptmRSExpr = re.compile(r"(\w+)\((\w+)\):(.+)")
+phRSExpr = re.compile(r"(\w+)\((\d+)\)(?:x\d+)?:(.+)")
 
 class ListBoxChoice(object):
     def __init__(self, master=None, title=None, message=None, data = []):
@@ -204,6 +204,9 @@ class toolUI(Frame):
                 self.prsScoreText.set('95')
     
     def start(self):
+        if self.prsScoreText.get() == '':
+            self.prsScoreText.set("0")
+            
         process(self.ifPathText.get(), float(self.prsScoreText.get()), bool(self.doDAVar.get()),
                 'PD', self.labFileText.get(), self.prsNameText.get())
 
@@ -388,21 +391,37 @@ def parsePRS(modstring, minProb):
     """
     result = []
     sumProb = 0#total probability ~ number of phospho sites
-    for chunk in modstring.split(';'):#split possible positions
-        aaPos, prob = chunk.strip().split(':')#split probability
-        try:
+    for chunk in modstring.strip().split(';'):#split possible positions
+        try: #trying to deduce format
+            aa, pos, prob = phRSExpr.match(chunk.strip()).groups()
+            pos = int(pos)
+        
+        except AttributeError: #wrong format should result in Attribute error, since matchObject is None
+            try:
+                aaPos, mod, prob = ptmRSExpr.match(chunk.strip()).groups()
+                if mod in modifications['Phosphorylation']:
+                    aa = aaPos[0]
+                    pos = int(aaPos[1:])
+                else:
+                    continue
+            except AttributeError:
+                if chunk.strip() == "":
+                    raise ValueError("Empty site probabilities string")
+                else:
+                    raise Exception("Can't deduce site probabilities format from '{}'".format(chunk.strip()))
+        
+        try: #parsing probability
             prob = float(prob)
         except ValueError:
             try:
-                prob = float(prob.replace(',', '.'))
+                prob = float(prob.replace(",", "."))
             except ValueError:
-                raise ValueError('Cannot convert to number: {}'.format(prob))
-                
-        sumProb += prob
+                raise Exception("Can't parse site probability: {}".format(prob))
+        
+        sumProb += prob#collecting total site probability
+        
         if prob > minProb:#add valid positions
-            oPos = aaPos.find('(') + 1
-            cPos = aaPos.find(')', oPos) 
-            result.append((aaPos[0], int(aaPos[oPos:cPos])))
+            result.append((aa, pos))
     
     return result, int(round(sumProb/100, 0))
 
@@ -411,10 +430,24 @@ def findDAsites(sequence):
     Find conservative deamidation sites: N[X!=P][STC]
     """
     result = []
-    for x in re.finditer('N[^P][STC]', sequence):
+    for x in daExpr.finditer(sequence):
         result.append(x.start() + 1)
     
     return result
+
+def hasFlankingResidues(sequence):
+    """
+    Check if the sequence has flanking residues and strip them out
+    Return  False if no flanking residues
+            and tuple (flankingUp, sequence, flankingDown) otherwise
+    """
+    
+    m = flankExpr.match(sequence)
+    
+    if not m is None:
+        return m.groups()
+    else:
+        return False
 
 def applyModsPD(sequence, modline, PRSstring = None, prsProb = 95.0, parseDeamidation = False):
     """
@@ -580,8 +613,17 @@ def process(excelInput, minPRS, doDA, inputMode, moddictInput, prsColumnName = N
                     PRSstring = None
                     
                 if worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value != None:
-                    sequence = applyModsPD(worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value.upper(),\
-                        worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value, PRSstring, minPRS, doDA)
+                    rawSequence = worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value
+                    flanking = hasFlankingResidues(rawSequence) #check for flanking residues
+                    if not flanking:
+                        sequence = applyModsPD(rawSequence.upper(),\
+                            worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value, PRSstring, minPRS, doDA)
+                    else:
+                        sequence = applyModsPD(flanking[1].upper(),\
+                            worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value, PRSstring, minPRS, doDA)
+                        
+                        sequence = flanking[0] + sequence + flanking[2]
+                        
                 else:
                     sequence = None
                 

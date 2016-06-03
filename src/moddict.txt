@@ -1,0 +1,21 @@
+# Use the following format to define modifications
+# [Name]	[Symbol]	[Representation] (tab separated)
+# Name is the name of the modification, ex. Phosphorylation
+# Symbol is the way this modification is represented in the modified sequence, ex. in pY the symbol is p
+# Representation is the way it is represented in the file from PD, ex. Phosp, Phospho that is used to denote phosphorylation by MASCOT and SequestHT, respectively
+# There could be multiple representations separated by comma (,)
+# Lines starting with # are ignored
+# empty lines ignored
+# NONE is reserved to define empty symbol
+
+Phosphorylation	p	Phosp,Phospho,ph
+PhosphoGaComplex	g	Ga co,PhosphoGa
+Carbamidomethyl	NONE	Carbamidomethyl
+Unknown111	NONE	111.0
+Oxidation	o	Oxidation,ox,Oxida
+Acetylation	a	Acetyl,Prot)(Acetyl
+TMT6plex	NONE	TMT6plex
+Deamidation	d	Deami,Deamidated
+iTRAQ8plex	NONE	iTRAQ8plex
+iTRAQ4plex	NONE	iTRAQ4plex
+Nethylmaleimide	NONE	Nethylmaleimide
