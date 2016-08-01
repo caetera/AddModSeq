@@ -19,3 +19,4 @@ Deamidation	d	Deami,Deamidated
 iTRAQ8plex	NONE	iTRAQ8plex
 iTRAQ4plex	NONE	iTRAQ4plex
 Nethylmaleimide	NONE	Nethylmaleimide
+CysteineTag	c	Cys tag

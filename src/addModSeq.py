@@ -8,6 +8,7 @@ Modified sequence
 """
 import sys
 import re
+from collections import defaultdict
 from openpyxl import load_workbook
 from openpyxl.cell import get_column_letter
 from os import path
@@ -16,18 +17,19 @@ from Tkinter import *
 import tkFileDialog
 import tkMessageBox
 
-
 #constants
 moddict = {}
 modifications = {}
 prsProb = 0.0
 
 #regexes
-daExpr = re.compile('N[^P][STC]')
-flankExpr = re.compile(r"(\[.+\]\.)(\w+)(\.\[.+\])")
-ptmRSExpr = re.compile(r"(\w+)\((\w+)\):(.+)")
-phRSExpr = re.compile(r"(\w+)\((\d+)\)(?:x\d+)?:(.+)")
+daExpr = re.compile("N[^P][STC]")
+flankExpr = re.compile(r"\[(.+)\]\.(\w+)\.\[(.+)\]")
+modExpr = re.compile(r"([\w-]+)\((\w+)\)")
+ptmRSExpr = re.compile(r"(\w+)\((\D+)\):\s*([\d.,]+)")
+phRSExpr = re.compile(r"(\w+)\((\d+)\)(?:x\d+)?:\s*([\d.,]+)")
 
+#GUI
 class ListBoxChoice(object):
     def __init__(self, master=None, title=None, message=None, data = []):
         self.master = master
@@ -195,7 +197,7 @@ class toolUI(Frame):
     
     def selectColumn(self):
         column = ListBoxChoice(self.parent, "Select column",
-                                    "Select the column that has phosphoRS data", self.headers).returnValue()
+                                    "Select the column that has phosphoRS or ptmRS data", self.headers).returnValue()
         
         if not column is None:
             self.prsNameText.set(column)
@@ -210,11 +212,236 @@ class toolUI(Frame):
         process(self.ifPathText.get(), float(self.prsScoreText.get()), bool(self.doDAVar.get()),
                 'PD', self.labFileText.get(), self.prsNameText.get())
 
+class ModificationGroup(object):
+    """
+    Represent one specific type of modifications, ex. Phosphorylation or Oxidation etc
+    """
+    def __init__(self, name, symbol):
+        self.name = name
+        self.symbol = symbol
+        self.unbound = 0
+        self.positions = []
+    
+    def __repr__(self):
+        return "{}<{}>: BoundTo: {} + {} unbound".\
+            format(self.name, self.symbol, " ".join(self.positions), self.unbound)
+
+class Peptide(object):
+    """
+    Represent peptide
+    """
+    def  __init__(self, sequence, flankN = "", flankC = ""):
+        self.sequence = sequence
+        self.modifications = {}
+        self.mutations = []
+        self.flankN = flankN
+        self.flankC = flankC
+        
+    def setModification(self, name, modification):
+        self.modifications[name] = modification
+    
+    def addMutation(self, mutation):
+        self.mutations.append(mutation)
+    
+    def verifyDaSites(self):
+        #no deamidation is mapped in modifications
+        if not self.modifications.has_key("Deamidated"):
+            return
+
+        #apply mutations
+        mutatedSequence = self._applyMutations()
+        
+        #collect valid deamidation sites
+        validSites = set()
+        for AA in self.flankC:#each letter in flanking string represent possible flanking AA
+            for site in daExpr.finditer(mutatedSequence + AA):
+                validSites.add(site.start() + 1)
+                    
+        #check if ptmRS assigned sites properly    
+        for loc in self.modifications["Deamidated"].positions[:]:
+            pos = int(loc[1:])
+            if not pos in validSites:
+                #remove invalid
+                self.modifications["Deamidated"].positions.remove(loc)
+                self.modifications["Deamidated"].unbound += 1
+            else:
+                #remove properly assigned sites from the set of available sites
+                validSites.remove(pos)
+        
+        #if the number of unbound modifications is greater or equal to number 
+        #of available sites assign them all
+        if len(validSites) <= self.modifications["Deamidated"].unbound:
+            locs = ["{}{}".format(self.sequence[s - 1], s) for s in validSites]
+            self.modifications["Deamidated"].positions.extend(locs)
+            self.modifications["Deamidated"].unbound -= len(validSites)
+        
+    def toModX(self):
+        result = ""
+        modText = defaultdict(list)
+        mutSequence = self._applyMutations()
+        
+        for name in sorted(self.modifications.keys()):
+            for loc in self.modifications[name].positions:
+                if loc in ("N-Term", "C-Term"):
+                    modText[loc].append(self.modifications[name].symbol)
+                else:
+                    code = loc[0]
+                    pos = int(loc[1:]) - 1
+                    self._checkLocation(code, pos)
+                    modText[pos].append(self.modifications[name].symbol)
+            
+            modText["Unbound"].append("({})".format(self.modifications[name].symbol)\
+                                                    * self.modifications[name].unbound)
+        
+        if len(modText["Unbound"]) > 0:
+            result += "{}".format("".join(modText["Unbound"]))
+            
+        if len(modText["N-term"]) > 0:
+            result += "{}-".format(",".join(modText["N-term"]))
+            
+        for i in range(len(mutSequence)):
+            result += "{}{}".format(",".join(modText[i]), mutSequence[i])
+        
+        if len(modText["C-term"]) > 0:
+            result += "-{}".format(",".join(modText["C-term"]))        
+        
+        return "[{}].{}.[{}]".format(self.flankN, result, self.flankC)
+    
+    def _checkLocation(self, code, pos):
+        if self.sequence[pos] != code:
+            raise Exception("Modification position mismatch in sequence '{}' at #{}:\
+                            {} is not equal to {}".format(self.sequence, pos + 1,\
+                            self.sequence[pos], code))
+    
+    def _applyMutations(self):
+        result = self.sequence
+        for loc, mutAA in self.mutations:
+            code = loc[0]
+            pos = int(loc[1:]) - 1
+            
+            if result[pos] == code:
+                result = result[:pos] + mutAA + result[pos+1:]
+            else:
+                raise Exception("Mutation mismatch in sequence '{}' at #{}:\
+                                {} is not equal to {}".format(result, pos + 1,\
+                                result[pos], code))
+        
+        return result
+    
+    def __repr__(self):
+        return "Peptide: [{}].{}.[{}]\nModifications:\n{}\nMutations: {}"\
+                .format(self.flankN, self.sequence, self.flankC,\
+                "\n".join(map(repr, self.modifications.values())),\
+                self.mutations)
+
+def parseModDict(moddictInput):
+    """
+    Reads text file and updates dictionary of modifications
+    Parameters
+    moddictInput - path or filelike object to read dictionary from
+    Return
+    None
+    """
+    with open(moddictInput) as fin:
+        for line in fin:
+            if line.startswith('#') or line.strip() == '': #comments
+                continue
+            else: 
+                parts = line.strip().split('\t')
+                try:
+                    if parts[1] == 'NONE':
+                        parts[1] = ''
+                    modifications[parts[0]] = map(lambda s: s.strip(), parts[2].split(','))#all possible representaton of a modification
+                    for r in modifications[parts[0]]:
+                        moddict[r] = parts[1]
+                except:
+                    raise Exception('Error parsing modifications on the following line:\n{}'.format(line))
+
+def analyzePRS(prsString):
+    """
+    Convert ptmRS string into modification dictionary
+    """
+    result = defaultdict(list)
+    for item in ptmRSExpr.finditer(prsString):
+        pos, name, prob = item.groups()
+        try:
+            prob = float(prob)
+        except ValueError:
+            prob = float(prob.replace(",", "."))
+            
+        result[name].append((pos, prob))
+    
+    return result
+
+def analyzeMod(modString):
+    """
+    Convert modification string into modification dictionary
+    and the list of amino acid mutations
+    """
+    mods = defaultdict(list)
+    mutations = []
+    for item in modExpr.finditer(modString):
+        pos, name = item.groups()
+        
+        #split modifications from mutations
+        if pos[0] in ("X", "B", "Z", "J") and len(name) == 1 and name.isupper():
+            mutations.append((pos, name))
+        else:
+            mods[name].append(pos)
+    
+    return (mods, mutations)
+
+def createPeptide(seqString, modString, prsString, minProb):
+    """
+    Convert a combination of sequence string, modification string and ptmRS string
+    into single Peptide object.
+    """
+    try: #match to sequence with flanking residues
+        flankN, sequence, flankC = flankExpr.match(seqString).groups()
+        result = Peptide(sequence.upper(), flankN, flankC)
+    except AttributeError: #if match was unsuccessful this exception is fired
+        result = Peptide(seqString.upper())
+    
+    modDict, mutations = analyzeMod(modString)
+    prsDict = analyzePRS(prsString)
+    
+    result.mutations.extend(mutations)
+     
+    for name in prsDict.iterkeys(): #first check PRS assignments
+        modItem = filter(lambda (k, v): k[:5] == name, modDict.iteritems())
+        #Since ptmRS uses first 5 letters of modification name as identifier
+        #we have to find the full name in the modString
+        #Assumingly there should be only one match, but...
+        if len(modItem) > 1:
+            raise Exception("Ambiguous modification name in ptmRS string:\n\
+                             '{}' vs {}".format(name, [i[0] for i in modItem]))
+        
+        modItem = modItem[0] #remove corresponding element from modDict
+        
+        boundPositions = [p for p, pp in filter(lambda (p, pp): pp >= minProb, prsDict[name])]
+        modification = ModificationGroup(modItem[0], moddict[modItem[0]])
+        modification.positions.extend(boundPositions)
+        modification.unbound = len(modItem[1]) - len(boundPositions)
+
+        result.setModification(modification.name, modification)
+        
+        modDict.pop(modItem[0])
+    
+    for name in modDict.iterkeys(): #add all modifications, that were not assigned by ptmRS
+        modification = ModificationGroup(name, moddict[name])
+        modification.positions.extend(modDict[name])
+        
+        result.setModification(modification.name, modification)
+    
+    return result
+
 #functions
 def parseCLInput(arguments):
     """
     Parse input from command line
     """
+    raise NotImplementedError("Yet to be updated")
+    
     if not path.isfile(arguments[1]):
             print "Can't find filename: {}".format(arguments[1])
             return False
@@ -252,6 +479,8 @@ def printUsage():
     """
     Print usage info
     """
+    raise NotImplementedError("Yet to be updated")
+    
     print 'Usage: {} excelInputFile [minPhosphoRS] [doDeamidation] [inputMode] [labels]\n\
     \tminPhosphoRS (optional) minimal phospoRS site probability to consider valid phospo site\n\
     \tdoDeamidation (optional) perform check for deamidation sites, can be Y(es) or N(o)\n\
@@ -268,6 +497,8 @@ def runInteractive():
     """
     Interactive mode
     """
+    raise NotImplementedError("Yet to be updated")
+    
     print "Hi, I'm here to help you with modifications.\nUsually I'm happy to run with some command line arguments, here is the small summary"
     printUsage()
     print "Unfortunately you have not provided any arguments. Don't worry, I'll guide you through"
@@ -343,193 +574,14 @@ def writeRow(worksheet, ColNr, rowNr, iterable):
     """
     for index in range(len(iterable)):
         worksheet.cell(get_column_letter(ColNr + index) + str(rowNr)).value = iterable[index]
-        
-def parseModDict(moddictInput):
-    """
-    Reads text file and updates dictionary of modifications
-    Parameters
-    moddictInput - path or filelike object to read dictionary from
-    Return
-    None
-    """
-    with open(moddictInput) as fin:
-        for line in fin:
-            if line.startswith('#') or line.strip() == '': #comments
-                continue
-            else: 
-                parts = line.strip().split('\t')
-                try:
-                    if parts[1] == 'NONE':
-                        parts[1] = ''
-                    modifications[parts[0]] = map(lambda s: s.strip(), parts[2].split(','))#all possible representaton of a modification
-                    for r in modifications[parts[0]]:
-                        moddict[r] = parts[1]
-                except:
-                    raise Exception('Error parsing modifications on the following line:\n{}'.format(line))
-
-def parsePTMRS(modstring, minProb):
-    """
-    Parse ptmRS site probabilities, retaining only positions with probability higher, than *minProb*
-    Return the positions and types
-    """
-    raise Exception("UnderConstruction!")
-    result = []
-    sumProb = 0#total probability ~ number of phospho sites
-    for chunk in modstring.split(';'):#split possible positions
-        aaPos, prob = chunk.strip().split(':')#split probability
-        prob = float(prob)
-        sumProb += prob
-        if prob > minProb:#add valid positions
-            result.append((aaPos[0], int(aaPos[2:-1])))
-    
-    return result, int(round(sumProb/100, 0))
-
-def parsePRS(modstring, minProb):
-    """
-    Parse phospoRS site probabilities, retaining only positions with probability higher, than *minProb*
-    Return the positions
-    """
-    result = []
-    sumProb = 0#total probability ~ number of phospho sites
-    for chunk in modstring.strip().split(';'):#split possible positions
-        try: #trying to deduce format
-            aa, pos, prob = phRSExpr.match(chunk.strip()).groups()
-            pos = int(pos)
-        
-        except AttributeError: #wrong format should result in Attribute error, since matchObject is None
-            try:
-                aaPos, mod, prob = ptmRSExpr.match(chunk.strip()).groups()
-                if mod in modifications['Phosphorylation']:
-                    aa = aaPos[0]
-                    pos = int(aaPos[1:])
-                else:
-                    continue
-            except AttributeError:
-                if chunk.strip() == "":
-                    raise ValueError("Empty site probabilities string")
-                else:
-                    raise Exception("Can't deduce site probabilities format from '{}'".format(chunk.strip()))
-        
-        try: #parsing probability
-            prob = float(prob)
-        except ValueError:
-            try:
-                prob = float(prob.replace(",", "."))
-            except ValueError:
-                raise Exception("Can't parse site probability: {}".format(prob))
-        
-        sumProb += prob#collecting total site probability
-        
-        if prob > minProb:#add valid positions
-            result.append((aa, pos))
-    
-    return result, int(round(sumProb/100, 0))
-
-def findDAsites(sequence):
-    """
-    Find conservative deamidation sites: N[X!=P][STC]
-    """
-    result = []
-    for x in daExpr.finditer(sequence):
-        result.append(x.start() + 1)
-    
-    return result
-
-def hasFlankingResidues(sequence):
-    """
-    Check if the sequence has flanking residues and strip them out
-    Return  False if no flanking residues
-            and tuple (flankingUp, sequence, flankingDown) otherwise
-    """
-    
-    m = flankExpr.match(sequence)
-    
-    if not m is None:
-        return m.groups()
-    else:
-        return False
-
-def applyModsPD(sequence, modline, PRSstring = None, prsProb = 95.0, parseDeamidation = False):
-    """
-    Provided unmodified sequence and modification string in format of PD
-    Return: sequence with modifications in modX format
-    Global dictionary moddict contains conversion rules
-    """
-    if modline == None or modline.strip() == "":
-        return sequence
-        
-    letters = [c for c in sequence] # translate string to char array
-    nterm = ""
-    cterm = ""
-    mods = modline.split(";")
-    
-    nDeamidation = 0 #number of invalid deamidated positions
-    dSites = None #valid deamidation positions
-    
-    for m in mods:
-        openbrace = m.find("(")
-        closebrace = m.rfind(")")
-        position = m[:openbrace].strip()
-        modtype = m[openbrace+1:closebrace]
-        
-        if not moddict.has_key(modtype) and position[0] != "X": #check the modification is known
-            raise Exception("Unknown modification: {}".format(modtype))
-        
-        if position.lower() == "c-term":
-            letters[-1] = moddict[modtype] #change last AA
-        elif position.lower() == "n-term":
-            #letters[0] = moddict[modtype] #change first AA
-            nterm += moddict[modtype]
-        elif position[0] == "X" and len(modtype) == 1: #joker AA
-            letters[int(position[1:])-1] = letters[int(position[1:])-1][:-1] + modtype #update last position (X in modX)
-        elif position[0] == "B" and len(modtype) == 1: #Asp vs Asn
-            assert modtype in ["D", "N"]
-            letters[int(position[1:])-1] = letters[int(position[1:])-1][:-1] + modtype #update last position
-        elif position[0] == "Z" and len(modtype) == 1: #Glu vs Gln
-            assert modtype in ["Q", "E"]
-            letters[int(position[1:])-1] = letters[int(position[1:])-1][:-1] + modtype #update last position
-        elif position[0] == "J" and len(modtype) == 1: #Leu vs Ile
-            assert modtype in ["I", "L"]
-            letters[int(position[1:])-1] = letters[int(position[1:])-1][:-1] + modtype #update last position
-        else:
-            assert position[0] == letters[int(position[1:])-1][-1] or position[0] in ["X", "B", "Z", "J"]
             
-            if not PRSstring is None and modtype in modifications['Phosphorylation']:
-                pass#don't parse phosphorylations if phospoRS mode is on
-            elif parseDeamidation and modtype in modifications['Deamidation']: #special deamidation mode is on
-                if dSites is None: #find valid positions if necessary
-                    dSites = findDAsites(sequence)
-                
-                if int(position[1:]) in dSites: #site is valid
-                    letters[int(position[1:])-1] = moddict[modtype] + letters[int(position[1:])-1] #add modification
-                else:
-                    nDeamidation += 1
-            else:
-                letters[int(position[1:])-1] = moddict[modtype] + letters[int(position[1:])-1] #add modification
-            
-    
-    if not PRSstring is None:#add phosphorylations from phosphoRS
-        try:
-            prsSites, numPhos = parsePRS(PRSstring, prsProb)
-            for aa, position in prsSites:
-                assert aa == letters[position-1][-1] or aa in ["X", "B", "Z", "J"]
-                letters[position-1] = moddict[modifications['Phosphorylation'][0]] + letters[position-1] #add modification
-        
-            nterm += '({})'.format(moddict[modifications['Phosphorylation'][0]]) * (numPhos - len(prsSites))#unassigned phospo sites
-            
-        except ValueError:
-            nterm += '[cannotassignP]'
-        
-    if parseDeamidation and nDeamidation > 0:#special parse of deamidation
-        nterm += '({})'.format(moddict[modifications['Deamidation'][0]]) * (nDeamidation)#deamidation without valid site
-        
-    return nterm + "".join(letters) + cterm
-    
 def applyModsMQ(sequence):
     """
     Parse modified sequence in MaxQuant format to modX format
     Global dictionary moddict contains conversion rules
     """
+    raise NotImplementedError("Yet to be updated")
+    
     openbrace = sequence.find('(')
     closebrace = sequence.find(')')
     
@@ -552,12 +604,14 @@ def process(excelInput, minPRS, doDA, inputMode, moddictInput, prsColumnName = N
         string with path or file-like object
     minPRS - minimal phospoRS site probability
         float
+    doDA - check deamidation sites using conservative motiff
+        bool
     inputMode - input format of excel file PD for Proteome Discoverer or MQ for MaxQuant
         string
     moddictInput - path to the textfile with modification labels
         string
-    doDA - special deamidation treatment switch
-        bool
+    prsColumnName - name of the column with ptmRS results
+        string or None
     Return:
     None
     """
@@ -603,38 +657,27 @@ def process(excelInput, minPRS, doDA, inputMode, moddictInput, prsColumnName = N
     
     for rowNr in range(2, lastRowNr + 1):#read all except headers
         try:
-            if inputMode.upper() == 'PD':
-                #parse PD style
-                if doPRS:#PRS present
-                    PRSstring = worksheet.cell(get_column_letter(selectedColumns[prsColumnName]) + str(rowNr)).value
-                    if PRSstring is None:#empty cells
-                        PRSstring = ''
-                else:
-                    PRSstring = None
-                    
-                if worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value != None:
-                    rawSequence = worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value
-                    flanking = hasFlankingResidues(rawSequence) #check for flanking residues
-                    if not flanking:
-                        sequence = applyModsPD(rawSequence.upper(),\
-                            worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value, PRSstring, minPRS, doDA)
-                    else:
-                        sequence = applyModsPD(flanking[1].upper(),\
-                            worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value, PRSstring, minPRS, doDA)
-                        
-                        sequence = flanking[0] + sequence + flanking[2]
-                        
-                else:
-                    sequence = None
+            if doPRS:#PRS present
+                PRSstring = worksheet.cell(get_column_letter(selectedColumns[prsColumnName]) + str(rowNr)).value
+                if PRSstring is None:#empty cells
+                    PRSstring = ""
+            else:
+                PRSstring = ""
+            
+            if worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value != None:
+                seqString = worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value
+                modString = worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value
                 
-            elif inputMode.upper() == 'MQ':
-                #parse MQ style
-                sequence = applyModsMQ(worksheet.cell(get_column_letter(selectedColumns[u'modified sequence']) + str(rowNr)).value)
+                peptide = createPeptide(seqString, modString, PRSstring, minPRS)
+                
+                if doDA:
+                    peptide.verifyDaSites()
+                
+                sequence = peptide.toModX()
                 
             else:
-                #wrong input
-                raise ValueError('Unknown input mode: {}\nUse PD for Proteome Discoverer, or MQ for MaxQuant'.format(inputMode)) 
-            
+                sequence = None
+                
         except KeyError as ex:
             raise Exception("Missing column in the input file: {}".format(ex.message))
         
