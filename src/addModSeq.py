@@ -415,6 +415,8 @@ def createPeptide(seqString, modString, prsString, minProb):
         if len(modItem) > 1:
             raise Exception("Ambiguous modification name in ptmRS string:\n\
                              '{}' vs {}".format(name, [i[0] for i in modItem]))
+        elif len(modItem) == 0:
+            raise Exception("Unidentified modification in PRS string: {}".format(name))
         
         modItem = modItem[0] #remove corresponding element from modDict
         
