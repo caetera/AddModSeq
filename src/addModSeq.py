@@ -174,7 +174,7 @@ class toolUI(Frame):
     
     def findPRS(self, openName):
         #find phosphoRS column
-        worksheet = load_workbook(openName).get_active_sheet() #open excel sheet
+        worksheet = load_workbook(openName, use_iterators = True).get_active_sheet() #open excel sheet
         
         self.headers = [unicode(worksheet.cell(get_column_letter(columnNr) + '1').value).lower()
             for columnNr in range(1, worksheet.get_highest_column() + 1)]
@@ -243,37 +243,58 @@ class Peptide(object):
     def addMutation(self, mutation):
         self.mutations.append(mutation)
     
+    def iterateFlanks(self, useN = True, useC = True):
+        #return all possible sequences with different flanking residues
+        #useN - use N-terminal flanks
+        #useC - use C-terminal flanks
+        #each letter in flanking string represent possible flanking AA
+        if useN and len(self.flankN) > 0:
+            nAA = [a for a in self.flankN]
+        else:
+            nAA = [""]
+            
+        if useC and len(self.flankC) > 0:
+            cAA = [a for a in self.flankC]
+        else:
+            cAA = [""]
+            
+        #here we should work with mutated sequence
+        return (n + self._applyMutations() + c for n in nAA for c in cAA)
+    
     def verifyDaSites(self):
-        #no deamidation is mapped in modifications
-        if not self.modifications.has_key("Deamidated"):
-            return
-
-        #apply mutations
-        mutatedSequence = self._applyMutations()
-        
+        #trying to deduce the name for deamidaton
+        daName = ""
+        for testName in modifications["Deamidation"]:
+            if self.modifications.has_key(testName):
+                daName = testName
+                break
+                
+        if daName == "":#no demidation
+            return 
+ 
         #collect valid deamidation sites
         validSites = set()
-        for AA in self.flankC:#each letter in flanking string represent possible flanking AA
-            for site in daExpr.finditer(mutatedSequence + AA):
+        for testSequence in self.iterateFlanks(useN = False):
+            for site in daExpr.finditer(testSequence):
                 validSites.add(site.start() + 1)
                     
         #check if ptmRS assigned sites properly    
-        for loc in self.modifications["Deamidated"].positions[:]:
+        for loc in self.modifications[daName].positions[:]:
             pos = int(loc[1:])
             if not pos in validSites:
                 #remove invalid
-                self.modifications["Deamidated"].positions.remove(loc)
-                self.modifications["Deamidated"].unbound += 1
+                self.modifications[daName].positions.remove(loc)
+                self.modifications[daName].unbound += 1
             else:
                 #remove properly assigned sites from the set of available sites
                 validSites.remove(pos)
         
         #if the number of unbound modifications is greater or equal to number 
         #of available sites assign them all
-        if len(validSites) <= self.modifications["Deamidated"].unbound:
+        if len(validSites) <= self.modifications[daName].unbound:
             locs = ["{}{}".format(self.sequence[s - 1], s) for s in validSites]
-            self.modifications["Deamidated"].positions.extend(locs)
-            self.modifications["Deamidated"].unbound -= len(validSites)
+            self.modifications[daName].positions.extend(locs)
+            self.modifications[daName].unbound -= len(validSites)
         
     def toModX(self):
         result = ""
@@ -373,6 +394,23 @@ def analyzePRS(prsString):
     
     return result
 
+def analyzePhRS(phrsString):
+    """
+    Convert phosphoRS string into modification dictionary
+    """
+    result = defaultdict(list)
+    for item in phRSExpr.finditer(phrsString):
+        aa, pos, prob = item.groups()
+        try:
+            prob = float(prob)
+        except ValueError:
+            prob = float(prob.replace(",", "."))
+            
+        result["Phosp"].append((aa+pos, prob)) #5 letter code is to be compatible with ptmRS
+    
+    return result
+
+
 def analyzeMod(modString):
     """
     Convert modification string into modification dictionary
@@ -403,7 +441,14 @@ def createPeptide(seqString, modString, prsString, minProb):
         result = Peptide(seqString.upper())
     
     modDict, mutations = analyzeMod(modString)
-    prsDict = analyzePRS(prsString)
+    if prsString != "":       
+        prsDict = analyzePRS(prsString) #try parsing with ptmRS rules
+        if prsDict == {}: #if parsing was unsuccessful, i.e. no modifications found
+            prsDict = analyzePhRS(prsString) #try with phosphoRS rules
+        if prsDict == {}:
+            print "WARNING Can not parse modification string: {}".format(prsString)
+    else:
+        prsDict = {}
     
     result.mutations.extend(mutations)
      
