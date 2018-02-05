@@ -446,14 +446,14 @@ def createPeptide(seqString, modString, prsString, minProb):
         if prsDict == {}: #if parsing was unsuccessful, i.e. no modifications found
             prsDict = analyzePhRS(prsString) #try with phosphoRS rules
         if prsDict == {}:
-            print "WARNING Can not parse modification string: {}".format(prsString)
+            print("WARNING Can not parse modification string: {}".format(prsString))
     else:
         prsDict = {}
     
     result.mutations.extend(mutations)
      
     for name in prsDict.iterkeys(): #first check PRS assignments
-        modItem = filter(lambda (k, v): k[:5] == name, modDict.iteritems())
+        modItem = filter(lambda (k, v): k == name, modDict.iteritems())
         #Since ptmRS uses first 5 letters of modification name as identifier
         #we have to find the full name in the modString
         #Assumingly there should be only one match, but...
@@ -494,7 +494,7 @@ def parseCLInput(arguments):
             return False
             
     if len(arguments) == 2:
-        print "Using default minimal phosphoRS site probability (95)\nUsing usual deamidation treatment\nUsing default inputMode (PD)\nUsing default labels (moddict.txt)"
+        print("Using default minimal phosphoRS site probability (95)\nUsing usual deamidation treatment\nUsing default inputMode (PD)\nUsing default labels (moddict.txt)")
         arguments = arguments[1:2] + ['95.0', 'N', 'PD', 'moddict.txt']
     elif len(arguments) == 3:
         print "Using usual deamidation treatment\nUsing default inputMode (PD)\nUsing default labels (moddict.txt)"
@@ -710,23 +710,37 @@ def process(excelInput, minPRS, doDA, inputMode, moddictInput, prsColumnName = N
                     PRSstring = ""
             else:
                 PRSstring = ""
-            
-            if worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value != None:
-                seqString = worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value
-                modString = worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value
-                
-                peptide = createPeptide(seqString, modString, PRSstring, minPRS)
-                
-                if doDA:
-                    peptide.verifyDaSites()
-                
-                sequence = peptide.toModX()
-                
-            else:
-                sequence = None
-                
-        except KeyError as ex:
+        
+        except KeyError as ex:            
             raise Exception("Missing column in the input file: {}".format(ex.message))
+        
+        if worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value != None:
+            seqString = worksheet.cell(get_column_letter(selectedColumns[u'sequence']) + str(rowNr)).value
+            modString = worksheet.cell(get_column_letter(selectedColumns[u'modifications']) + str(rowNr)).value
+            
+            try:
+                peptide = createPeptide(seqString, modString, PRSstring, minPRS)
+            except Exception as ex:
+                print "Cannot create peptide from\n{}".format((seqString, modString, PRSstring, minPRS))
+                raise ex                
+            
+            if doDA:
+                try:
+                    peptide.verifyDaSites()
+                except Exception as ex:
+                    print "Cannot verify deamidation in {}".format(peptide)
+                    raise ex                
+            
+            try:
+                sequence = peptide.toModX()
+            except Exception as ex:
+                print "Cannot convert {} to modX format\n".format(peptide)
+                raise ex                
+            
+            
+        else:
+            sequence = None
+            
         
         writeRow(worksheet, lastColNr, rowNr, [sequence])
         writeCount += 1
